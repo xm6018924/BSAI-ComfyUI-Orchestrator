@@ -459,6 +459,10 @@ class XPUVAEServer:
         self._inflight = 0
         self._total = 0
         self._started = time.time()
+        # 引擎忙碌统计：滑动窗口记录每次解码任务 [start_ts, duration]，
+        # duration=None 表示仍在进行中（按 now-start 计）。窗口 10s。
+        self._BUSY_WINDOW = 10.0
+        self._busy_hist = []
 
     def _load(self):
         if self._vae is None:
@@ -487,9 +491,11 @@ class XPUVAEServer:
         return self._vae
 
     def decode_bytes(self, payload: bytes) -> bytes:
+        t0 = time.time()
         with self._lock:
             self._inflight += 1
             self._total += 1
+            self._busy_hist.append([t0, None])  # 解码任务开始（进行中）
         try:
             if len(payload) < 12 or payload[:8] != _MAGIC:
                 raise ValueError("协议头错误（魔数/长度）")
@@ -519,6 +525,33 @@ class XPUVAEServer:
         finally:
             with self._lock:
                 self._inflight -= 1
+                # 收尾：记录任务实际耗时（引擎忙碌时长）
+                if self._busy_hist and self._busy_hist[-1][1] is None:
+                    self._busy_hist[-1][1] = time.time() - t0
+
+    def _busy_pct(self):
+        """最近 10s 引擎忙碌率：窗口内解码执行时长累计 ÷ 窗口 × 100。
+
+        进行中任务按 (now - start) 计入；已完成的按实际耗时计入；
+        完全滑出窗口的旧条目剔除。单线程串行解码 → 即真实引擎负载。
+        """
+        now = time.time()
+        keep = []
+        busy_sum = 0.0
+        for start, dur in self._busy_hist:
+            if dur is None:
+                busy = now - start
+                keep.append([start, None])
+            else:
+                if start + dur < now - self._BUSY_WINDOW:
+                    continue
+                busy = dur
+                keep.append([start, dur])
+            busy_sum += min(busy, self._BUSY_WINDOW)
+        self._busy_hist = keep
+        if not self._busy_hist:
+            return 0.0
+        return min(100.0, busy_sum / self._BUSY_WINDOW * 100.0)
 
     def _decode_frames(self, vae, lat):
         """按时间维拆帧、串行解码：H3 VAE 的 tiled_decode 对整段 latent 逐 tile
@@ -575,6 +608,8 @@ class XPUVAEServer:
             except Exception:
                 pass
             out["ok"] = True
+            # 引擎忙碌率（真负载）——HUD 表盘主读数
+            out["busy_pct"] = round(self._busy_pct(), 1)
             if mem_ok:
                 out["devices"] = [{
                     "name": name, "vram_free": int(free),
