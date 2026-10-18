@@ -470,11 +470,11 @@ class XPUVAEServer:
                 if self._vae is None:
                     import torch
                     if not getattr(torch, "xpu", None) or not torch.xpu.is_available():
-                        raise RuntimeError("torch.xpu 不可用（本服务须在 XPU 实例运行）")
+                        raise RuntimeError("torch.xpu unavailable (this service must run on the XPU instance)")
                     from comfy.sd import VAE
                     from comfy.utils import load_torch_file
                     if not os.path.exists(self.vae_path):
-                        raise FileNotFoundError("VAE 模型缺失: %s" % self.vae_path)
+                        raise FileNotFoundError("VAE model missing: %s" % self.vae_path)
                     print("[BSAI-XPU-VAE] 加载 VAE: %s" % os.path.basename(self.vae_path), flush=True)
                     t0 = time.time()
                     _sd = load_torch_file(self.vae_path)
@@ -498,11 +498,11 @@ class XPUVAEServer:
             self._busy_hist.append([t0, None])  # 解码任务开始（进行中）
         try:
             if len(payload) < 12 or payload[:8] != _MAGIC:
-                raise ValueError("协议头错误（魔数/长度）")
+                raise ValueError("bad protocol header (magic/length)")
             ndim = struct.unpack("<I", payload[8:12])[0]
             off = 12
             if ndim < 1 or ndim > 8:
-                raise ValueError("非法维数 %d" % ndim)
+                raise ValueError("invalid ndim %d" % ndim)
             shape = list(struct.unpack("<%dI" % ndim, payload[off:off + 4 * ndim]))
             off += 4 * ndim
             import torch
@@ -516,7 +516,7 @@ class XPUVAEServer:
                 pass
             out = self._decode_frames(vae, lat)
             if out is None:
-                raise RuntimeError("first_stage_model.decode 返回 None")
+                raise RuntimeError("first_stage_model.decode returned None")
             out = out.detach().cpu().float().contiguous()
             b = out.numpy().tobytes()
             head = _MAGIC + struct.pack("<I", out.dim()) + \
@@ -566,7 +566,7 @@ class XPUVAEServer:
         for i in range(n_frames):
             o = vae.first_stage_model.decode(lat[:, :, i:i + 1, :, :])
             if o is None:
-                raise RuntimeError("frame decode 返回 None")
+                raise RuntimeError("frame decode returned None")
             outs.append(o.detach().cpu().float().contiguous())
             del o
             try:

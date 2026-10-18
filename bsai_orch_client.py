@@ -265,7 +265,7 @@ class BSAIOrch:
         caps = [c for c in BSAIOrch.capabilities().values()
                 if c.get("kind") == kind]
         if not caps:
-            return Allocation(False, reason="kind '%s' 未注册" % kind)
+            return Allocation(False, reason="kind '%s' not registered" % kind)
 
         # 2) 探活：剔除离线硬件（health 探针）
         online = []
@@ -273,7 +273,7 @@ class BSAIOrch:
             if BSAIOrch._probe(c.get("health")):
                 online.append(c)
         if not online:
-            return Allocation(False, reason="全部硬件离线（探活失败）")
+            return Allocation(False, reason="all hardware offline (health probe failed)")
 
         # 3) 水位分流：kind=vae_decode 且候选含 cuda 且 GPU1 余量低 → 剔除 cuda
         if gpu_free_mb is None:
@@ -296,7 +296,7 @@ class BSAIOrch:
                     order.append(h)
         target = order[0] if order else None
         if target is None:
-            return Allocation(False, reason="无可用硬件目标")
+            return Allocation(False, reason="no available hardware target")
         cap = next(c for c in cands
                    if (c.get("hardware") or []) and target in c["hardware"])
 
@@ -314,7 +314,7 @@ class BSAIOrch:
         BSAIOrch._enqueue(resource, requester, kind)
 
         if not ok:
-            return Allocation(False, target=target, reason="资源 %s 被占用" % resource)
+            return Allocation(False, target=target, reason="resource %s is occupied" % resource)
         return Allocation(True, target=target, endpoint=cap.get("endpoint", ""),
                           gen=gen, lease_ok=True, stop_fn=stop_fn,
                           resource=resource)

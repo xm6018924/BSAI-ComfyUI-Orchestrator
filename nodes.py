@@ -33,10 +33,10 @@ class BSAIOrchestratorGate:
             "required": {
                 "xpu_offload_min_vram": (
                     "INT", {"default": 2500, "min": 0, "max": 65536, "step": 100,
-                            "tooltip": "GPU1 显存余量低于此值(MB) → VAE 解码分流 XPU/CPU"}),
+                            "tooltip": "When GPU1 free VRAM drops below this (MB), offload VAE decode to XPU/CPU"}),
                 "cuda_reserve_mb": (
                     "INT", {"default": 750, "min": 0, "max": 65536, "step": 100,
-                            "tooltip": "GPU1 常驻保留显存(MB)，采样不越过"}),
+                            "tooltip": "Resident VRAM kept free on GPU1 (MB); sampling must not exceed this"}),
             },
             "optional": {
                 "latent": ("LATENT",),
@@ -47,7 +47,7 @@ class BSAIOrchestratorGate:
     RETURN_TYPES = ("STRING", "LATENT", "IMAGE")
     RETURN_NAMES = ("vae_target", "latent", "images")
     FUNCTION = "route"
-    CATEGORY = "BSAI/编排"
+    CATEGORY = "BSAI/Orchestrator"
 
     def route(self, xpu_offload_min_vram, cuda_reserve_mb,
               latent=None, images=None):
@@ -100,7 +100,7 @@ class BSAIOrchestratorStatus:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("status_json",)
     FUNCTION = "status"
-    CATEGORY = "BSAI/编排"
+    CATEGORY = "BSAI/Orchestrator"
 
     def status(self):
         sig = get_signals()
@@ -114,6 +114,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "BSAIOrchestratorGate": "BSAI 编排门 (水位决策 + 资源租约)",
-    "BSAIOrchestratorStatus": "BSAI 编排状态 (租约/队列/信号)",
+    "BSAIOrchestratorGate": "BSAI Orchestrator Gate (VRAM policy + resource lease)",
+    "BSAIOrchestratorStatus": "BSAI Orchestrator Status (leases/queue/signals)",
 }
