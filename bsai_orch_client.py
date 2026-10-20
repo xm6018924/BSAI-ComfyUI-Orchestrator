@@ -151,7 +151,18 @@ def _policy():
     return {
         "xpu_offload_min_vram": int(p.get("xpu_offload_min_vram", 2500)),
         "cuda_reserve_mb": int(p.get("cuda_reserve_mb", 750)),
+        # 双轨（tier）策略：local-first / cloud-first
+        "prefer_tier": p.get("prefer_tier", "local-first"),
+        "local_min_vram_mb": int(p.get("local_min_vram_mb", 2000)),
     }
+
+
+def cloud_key_available(api_key_env):
+    """云端档位可用性：指定环境变量非空即视为可用（不发起网络请求）。"""
+    if not api_key_env:
+        return False
+    v = os.environ.get(api_key_env, "")
+    return bool(v and v.strip())
 
 
 # ---------------- Allocation（分配结果） ----------------
@@ -223,6 +234,116 @@ class BSAIOrch:
     def list_kinds():
         return sorted({c.get("kind") for c in
                        BSAIOrch.capabilities().values()})
+
+    # ---------- 双轨（tier）决策 ----------
+    @staticmethod
+    def decide_tier(kind, prefer_tier=None, gpu_free_mb=None):
+        """双轨决策：同 kind 的能力按 meta.tier(local/cloud) 分组，按策略选档。
+
+        返回 dict：{tier, backend, engine, endpoint, reason,
+                    local_caps[], cloud_caps[]}；无可用档时 tier=None。
+        与本地硬件分流（allocate）正交：先选档，local 档再走 allocate 分流。
+        """
+        policy = _policy()
+        prefer_tier = prefer_tier or policy.get("prefer_tier", "local-first")
+        if gpu_free_mb is None:
+            gpu_free_mb = _gpu1_free_mb()
+
+        def _tier_of(c):
+            return (c.get("meta") or {}).get("tier", "local")
+
+        local_caps = [c for c in BSAIOrch.capabilities().values()
+                      if c.get("kind") == kind and _tier_of(c) == "local"]
+        cloud_caps = [c for c in BSAIOrch.capabilities().values()
+                      if c.get("kind") == kind and _tier_of(c) == "cloud"]
+        # 云端档必须 key 已配置才可选
+        cloud_avail = [c for c in cloud_caps
+                       if cloud_key_available((c.get("meta") or {}).get("api_key_env"))]
+
+        reason = ""
+        chosen = None
+        if prefer_tier == "cloud-first":
+            chosen = cloud_avail[0] if cloud_avail else None
+            if chosen is None:
+                reason = "cloud-first but no cloud provider has API key configured"
+                if local_caps:
+                    chosen = local_caps[0]
+                    reason += "; fallback to local"
+        else:  # local-first（默认）
+            need = policy.get("local_min_vram_mb", 2000)
+            water_ok = (gpu_free_mb is None) or (gpu_free_mb >= need)
+            if water_ok and local_caps:
+                chosen = local_caps[0]
+                if not cloud_avail:
+                    pass
+            elif cloud_avail:
+                chosen = cloud_avail[0]
+                reason = ("local VRAM low (%sMB < %sMB); using cloud"
+                           % (gpu_free_mb, need))
+            elif local_caps:
+                chosen = local_caps[0]
+                reason = "cloud unavailable (no API key); using local anyway"
+
+        if chosen is None:
+            return {"tier": None, "backend": None, "engine": None,
+                    "endpoint": "",
+                    "reason": reason or ("no provider registered for kind '%s'" % kind),
+                    "local_caps": [c.get("name") for c in local_caps],
+                    "cloud_caps": [c.get("name") for c in cloud_caps]}
+        meta = chosen.get("meta") or {}
+        return {"tier": meta.get("tier", "local"),
+                "backend": chosen.get("name"),
+                "engine": meta.get("engine", chosen.get("name")),
+                "endpoint": chosen.get("endpoint", ""),
+                "reason": reason,
+                "local_caps": [c.get("name") for c in local_caps],
+                "cloud_caps": [c.get("name") for c in cloud_caps]}
+
+    @staticmethod
+    def set_policy(prefer_tier=None, local_min_vram_mb=None,
+                   xpu_offload_min_vram=None, cuda_reserve_mb=None):
+        """写策略到状态文件（跨进程生效；与编排核心同文件）。"""
+        def _do():
+            st = _load_state()
+            p = st.setdefault("policy", {})
+            if prefer_tier is not None:
+                p["prefer_tier"] = str(prefer_tier)
+            if local_min_vram_mb is not None:
+                p["local_min_vram_mb"] = int(local_min_vram_mb)
+            if xpu_offload_min_vram is not None:
+                p["xpu_offload_min_vram"] = int(xpu_offload_min_vram)
+            if cuda_reserve_mb is not None:
+                p["cuda_reserve_mb"] = int(cuda_reserve_mb)
+            _save_state(st)
+            return dict(p)
+
+        return _with_lock(_do)
+
+    # ---------- 云端调用遥测（Status 面板 P3 展示） ----------
+    @staticmethod
+    def record_cloud_call(engine, ok, latency_ms=0, error=""):
+        def _do():
+            st = _load_state()
+            tel = st.setdefault("cloud_telemetry", {})
+            e = tel.setdefault(engine, {
+                "calls": 0, "ok": 0, "fail": 0,
+                "last_latency_ms": 0, "last_ok": None,
+                "last_error": "", "last_ts": 0.0})
+            e["calls"] += 1
+            e["ok" if ok else "fail"] += 1
+            e["last_latency_ms"] = int(latency_ms)
+            e["last_ok"] = bool(ok)
+            e["last_error"] = error[:200]
+            e["last_ts"] = _now()
+            _save_state(st)
+            return True
+
+        return _with_lock(_do, fallback=False) is True
+
+    @staticmethod
+    def cloud_telemetry():
+        st = _load_state()
+        return st.get("cloud_telemetry", {})
 
     # ---------- 探活（5s 缓存） ----------
     _probe_cache = {}
@@ -464,3 +585,40 @@ def vae_decode_xpu(latent_np_f32, endpoint="http://127.0.0.1:8190/vae/decode",
     oshape = struct.unpack("<%dI" % ndim, data[12:12 + 4 * ndim])
     import numpy as np
     return np.frombuffer(data[12 + 4 * ndim:], dtype=np.float32).reshape(oshape)
+
+
+# ---------------- 内置档位注册表（声明式，双轨开箱即用） ----------------
+# 本地档 = BSAI 自家插件（已存在，不重写）；云端档 = ComfyUI 官方 Partner Node
+# 对应后端（BSAI 只做调度与执行，不重写官方节点）。
+BUILTIN_PROVIDERS = [
+    # 声音（tts_synth）
+    {"name": "BSAI IndexTTS-2.5", "kind": "tts_synth", "tier": "local",
+     "engine": "indextts", "cost": "free"},
+    {"name": "HeyGen Starfish", "kind": "tts_synth", "tier": "cloud",
+     "engine": "heygen", "api_key_env": "HEYGEN_API_KEY", "cost": "per_call"},
+    {"name": "ElevenLabs", "kind": "tts_synth", "tier": "cloud",
+     "engine": "elevenlabs", "api_key_env": "ELEVENLABS_API_KEY", "cost": "per_call"},
+    # 视频超分（video_upscale）
+    {"name": "BSAI SeedVR2", "kind": "video_upscale", "tier": "local",
+     "engine": "seedvr2", "cost": "free"},
+    {"name": "BSAI H3-upscale-4K", "kind": "video_upscale", "tier": "local",
+     "engine": "h3", "cost": "free"},
+    {"name": "FLUX Video Upscale", "kind": "video_upscale", "tier": "cloud",
+     "engine": "flux_upscale", "api_key_env": "BFL_API_KEY", "cost": "per_call"},
+    {"name": "Clarity Crystal", "kind": "video_upscale", "tier": "cloud",
+     "engine": "crystal", "api_key_env": "CAI_API_KEY", "cost": "per_call"},
+]
+
+
+def register_builtin_providers():
+    """把全家桶已知本地/云端档位写入 capabilities。
+    其他插件仍可自行 BSAIOrch.register() 覆盖同名条目。"""
+    for p in BUILTIN_PROVIDERS:
+        BSAIOrch.register(
+            name=p["name"], kind=p["kind"], hardware=[],
+            endpoint="", health="", weight=1.0,
+            meta={"tier": p["tier"], "engine": p["engine"],
+                  "api_key_env": p.get("api_key_env", ""),
+                  "cost": p.get("cost", "free")},
+        )
+    return len(BUILTIN_PROVIDERS)
