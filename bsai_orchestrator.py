@@ -55,6 +55,8 @@ PRIO_BATCH = 2
 DEFAULT_POLICY = {
     "xpu_offload_min_vram": 2500,  # GPU1 显存余量低于此值(MB) → VAE 分流
     "cuda_reserve_mb": 750,        # GPU1 常驻保留显存(MB)，采样不越过
+    "prefer_tier": "local-first",  # 双轨策略：local-first / cloud-first
+    "local_min_vram_mb": 2000,      # 本地档可用的最低空闲显存(MB)，低于则切云端
 }
 
 _LOCK_TTL = 120         # 租约默认 TTL（秒）。长任务请用 acquire_with_keepalive 续租
@@ -401,6 +403,11 @@ def get_signals():
         "xpu_online": _xpu_online(),
         "leases": st.get("leases", {}),
         "tasks": TaskRegistry.snapshot(),
+        # 双轨策略与云端遥测（P3）
+        "prefer_tier": policy.get("prefer_tier", DEFAULT_POLICY["prefer_tier"]),
+        "local_min_vram_mb": policy.get("local_min_vram_mb",
+                                        DEFAULT_POLICY["local_min_vram_mb"]),
+        "cloud_telemetry": st.get("cloud_telemetry", {}),
     }
     # 四路实时信号优先从 BSAI 硬件监视采集器拿（避免重复实现）
     try:
@@ -421,7 +428,8 @@ def get_signals():
     return sig
 
 
-def set_policy(xpu_offload_min_vram=None, cuda_reserve_mb=None):
+def set_policy(xpu_offload_min_vram=None, cuda_reserve_mb=None,
+               prefer_tier=None, local_min_vram_mb=None):
     """HUD 可调水位（保存到状态文件，跨进程生效）。"""
     def _do():
         st = _load_state()
@@ -430,6 +438,10 @@ def set_policy(xpu_offload_min_vram=None, cuda_reserve_mb=None):
             p["xpu_offload_min_vram"] = int(xpu_offload_min_vram)
         if cuda_reserve_mb is not None:
             p["cuda_reserve_mb"] = int(cuda_reserve_mb)
+        if prefer_tier is not None:
+            p["prefer_tier"] = str(prefer_tier)
+        if local_min_vram_mb is not None:
+            p["local_min_vram_mb"] = int(local_min_vram_mb)
         _save_state(st)
         return dict(p)
 
@@ -687,6 +699,64 @@ class _TextResponse:
         self.content_type = content_type
 
 
+# ---------------------------------------------------------------------------
+# Comfy Agent 对齐：/bsai/agent/capabilities
+# 返回 BSAI 节点清单（class_type / 显示名 / 分类 / 描述 / 输入 / 输出 / 函数名）
+# 与 BSAI 插件自带工作流模板清单，供 Comfy Agent / 外部 Agent 在自然语言规划时
+# 引用真实节点与模板，而不是凭空猜测 BSAI 节点名。
+# ---------------------------------------------------------------------------
+def _agent_capabilities():
+    import os as _os
+    caps = {"nodes": [], "workflows": [], "generated_at": time.time()}
+    try:
+        import nodes as _nodes
+        mappings = getattr(_nodes, "NODE_CLASS_MAPPINGS", {}) or {}
+        displays = getattr(_nodes, "NODE_DISPLAY_NAME_MAPPINGS", {}) or {}
+        for key in sorted(mappings.keys()):
+            if not key.startswith("BSAI"):
+                continue
+            cls = mappings[key]
+            try:
+                input_types = cls.INPUT_TYPES()
+                required = list((input_types.get("required") or {}).keys())
+                optional = list((input_types.get("optional") or {}).keys())
+            except Exception:
+                required, optional = [], []
+            caps["nodes"].append({
+                "class_type": key,
+                "display_name": displays.get(key, key),
+                "category": getattr(cls, "CATEGORY", ""),
+                "description": (getattr(cls, "DESCRIPTION", "") or
+                                getattr(cls, "DESCRIBE", "") or ""),
+                "required_inputs": required,
+                "optional_inputs": optional,
+                "output_types": list(getattr(cls, "RETURN_TYPES", ())),
+                "function": getattr(cls, "FUNCTION", ""),
+            })
+    except Exception:
+        pass
+    try:
+        import folder_paths
+        cn = folder_paths.get_folder_paths("custom_nodes")
+        roots = list(cn) if isinstance(cn, (list, tuple)) else [cn]
+        import glob as _glob
+        for root in roots:
+            if not _os.path.isdir(root):
+                continue
+            for plugin in sorted(_glob.glob(_os.path.join(root, "BSAI*"))):
+                if not _os.path.isdir(plugin):
+                    continue
+                for wf_dir in ("workflows", "example_workflows"):
+                    wd = _os.path.join(plugin, wf_dir)
+                    if not _os.path.isdir(wd):
+                        continue
+                    for wf in sorted(_glob.glob(_os.path.join(wd, "*.json"))):
+                        caps["workflows"].append(_os.path.relpath(wf, root).replace("\\", "/"))
+    except Exception:
+        pass
+    return caps
+
+
 def register_routes(prompt_server=None, vae_service=None):
     """挂编排端点（ComfyUI prompt_server）。
 
@@ -717,6 +787,12 @@ def register_routes(prompt_server=None, vae_service=None):
         except Exception as e:
             return _web_json({"error": str(e)}, status=400)
 
+    async def orch_agent_caps(_):
+        try:
+            return _web_json(_agent_capabilities())
+        except Exception as e:
+            return _web_json({"error": str(e)}, status=500)
+
     try:
         import server as _server
         _ps = prompt_server or _server.PromptServer.instance
@@ -729,7 +805,8 @@ def register_routes(prompt_server=None, vae_service=None):
                 router = app.router
             routes = getattr(_ps, "routes", None)
             items = [("GET", "/orch/state", orch_state),
-                     ("POST", "/orch/policy", orch_policy)]
+                     ("POST", "/orch/policy", orch_policy),
+                     ("GET", "/bsai/agent/capabilities", orch_agent_caps)]
             if vae_service and xvae is not None:
                 items += [
                     ("GET", "/health/ready", xvae.handle_ready),
@@ -755,7 +832,7 @@ def register_routes(prompt_server=None, vae_service=None):
                         except Exception:
                             pass
             extra = " + /vae/decode /system_stats /health/ready(VAE)" if vae_service else ""
-            print("[BSAI-Orchestrator] 编排端点已挂载: /orch/state /orch/policy%s" % extra)
+            print("[BSAI-Orchestrator] 编排端点已挂载: /orch/state /orch/policy /bsai/agent/capabilities%s" % extra)
         else:
             print("[BSAI-Orchestrator] PromptServer.instance 未就绪，路由延迟到节点触发注册")
     except Exception as e:
