@@ -1,0 +1,248 @@
+{
+  "last_node_id": 7,
+  "last_link_id": 3,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "BSAIOrchestratorBackendGate",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        400,
+        150
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "backend_json",
+          "type": "STRING",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "BSAIOrchestratorBackendGate"
+      },
+      "widgets_values": [
+        "local-first",
+        2000
+      ],
+      "title": "双轨策略门（本地优先 / 最低显存 2000MB）"
+    },
+    {
+      "id": 2,
+      "type": "BSAITTSSwitch",
+      "pos": [
+        480,
+        40
+      ],
+      "size": [
+        420,
+        220
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            2
+          ]
+        },
+        {
+          "name": "backend",
+          "type": "STRING",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "BSAITTSSwitch"
+      },
+      "widgets_values": [
+        "你好，这是 BSAI 双轨调度的声音测试。本地 IndexTTS 优先，云端 HeyGen/ElevenLabs 兜底。",
+        "auto",
+        "",
+        1.0
+      ],
+      "title": "声音统一入口（auto = 按策略决策档位）"
+    },
+    {
+      "id": 3,
+      "type": "SaveAudio",
+      "pos": [
+        940,
+        40
+      ],
+      "size": [
+        320,
+        130
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 2
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveAudio",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        "BSAI_dual_track_tts"
+      ],
+      "title": "保存云端/决策输出音频"
+    },
+    {
+      "id": 4,
+      "type": "ShowText",
+      "pos": [
+        480,
+        300
+      ],
+      "size": [
+        420,
+        240
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 1
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "ShowText"
+      },
+      "widgets_values": [],
+      "title": "决策预览（TTS / 超分各落哪档）"
+    },
+    {
+      "id": 5,
+      "type": "ShowText",
+      "pos": [
+        940,
+        200
+      ],
+      "size": [
+        320,
+        120
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 3
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "ShowText"
+      },
+      "widgets_values": [],
+      "title": "本次实际走的引擎"
+    },
+    {
+      "id": 6,
+      "type": "BSAIOrchestratorStatus",
+      "pos": [
+        40,
+        240
+      ],
+      "size": [
+        400,
+        220
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "status_json",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "BSAIOrchestratorStatus"
+      },
+      "widgets_values": [],
+      "title": "编排状态（含云端调用遥测）"
+    },
+    {
+      "id": 7,
+      "type": "Note",
+      "pos": [
+        1300,
+        40
+      ],
+      "size": [
+        380,
+        320
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "双轨声音工作流说明\n\n1. 上方「双轨策略门」：选 local-first（默认）或 cloud-first，并设本地档所需最低显存。策略跨进程生效。\n\n2. 「声音统一入口」engine=auto：按策略自动落档。\n   - 本地档（indextts）：本节点不重载模型，请把 text 接到你原有的 BSAI IndexTTS-2.5 节点执行；\n   - 云端档（heygen / elevenlabs）：本节点直接 HTTP 合成并输出 AUDIO。\n\n3. 云端 key：系统环境变量配 ELEVENLABS_API_KEY 或 HEYGEN_API_KEY / COMFY_API_KEY；缺失时会明确报错并自动回退本地。\n\n4. 「编排状态」面板可看：当前策略、租约、以及云端调用遥测（成功/失败/时延）。\n\n5. 想强制某一档：把 engine 从 auto 改为 heygen / elevenlabs / indextts 即可。"
+      ],
+      "title": "使用说明"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      4,
+      0,
+      "STRING"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      0,
+      "AUDIO"
+    ],
+    [
+      3,
+      2,
+      1,
+      5,
+      0,
+      "STRING"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}
