@@ -32,7 +32,11 @@ class CloudKeyError(RuntimeError):
 
 
 class CloudApiError(RuntimeError):
-    """云端 HTTP 调用失败（状态码/响应异常）。"""
+    """云端 HTTP 调用失败（状态码/响应异常）。status 为 HTTP 状态码（可解析时）。"""
+
+    def __init__(self, msg, status=None):
+        super().__init__(msg)
+        self.status = status
 
 
 def _record(engine, ok, latency_s, error=""):
@@ -64,7 +68,7 @@ def _http_json(url, payload, headers, timeout=120, method="POST"):
             return r.status, r.read(), dict(r.headers)
     except urllib.error.HTTPError as e:
         body = e.read()[:500].decode("utf-8", "ignore")
-        raise CloudApiError("HTTP %s @ %s: %s" % (e.code, url, body))
+        raise CloudApiError("HTTP %s @ %s: %s" % (e.code, url, body), status=e.code)
 
 
 def _http_get(url, headers, timeout=60):
@@ -74,7 +78,7 @@ def _http_get(url, headers, timeout=60):
             return r.status, r.read(), dict(r.headers)
     except urllib.error.HTTPError as e:
         body = e.read()[:300].decode("utf-8", "ignore")
-        raise CloudApiError("HTTP %s @ %s: %s" % (e.code, url, body))
+        raise CloudApiError("HTTP %s @ %s: %s" % (e.code, url, body), status=e.code)
 
 
 # ================= TTS =================

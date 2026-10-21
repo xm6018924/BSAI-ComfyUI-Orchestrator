@@ -203,6 +203,11 @@ class BSAITTSSwitch:
                 print("[BSAI-Orchestrator] TTS auto: %s" % d["reason"])
 
         if backend in ("heygen", "elevenlabs"):
+            if backend == "heygen":
+                # 核心 HeyGen Voice 1.0 节点（comfy_api_nodes/nodes_heygen.py）现已可用：
+                # 走平台工作区登录令牌 + 自动续期；本节点直连 REST 用静态 COMFY_API_KEY。
+                print("[BSAI-Orchestrator] TTS heygen: 也可直接使用核心 HeyGen Voice 节点"
+                      "（工作区登录令牌自动续期）；本节点走静态 COMFY_API_KEY 直连")
             try:
                 import bsai_cloud_gate as gate
                 audio_bytes, mime = gate.tts(
@@ -210,12 +215,17 @@ class BSAITTSSwitch:
                     voice_id=voice_id or None, speed=speed)
                 return (_audio_bytes_to_waveform(audio_bytes), backend)
             except Exception as e:
-                # 云端失败 → 明确报错（不静默返回空），附带建议
+                status = getattr(e, "status", None)
+                # 云端失败 → 明确报错（不静默返回空），按状态码给出建议
+                if status in (401, 403):
+                    hint = ("鉴权失败(HTTP %s)：1) 检查/更换 COMFY_API_KEY（静态密钥不会自动续期）；"
+                            "2) 或改用画布上的核心 HeyGen Voice 节点（工作区登录令牌 + 自动续期）；"
+                            "3) 本地执行请把 engine 切为 indextts" % status)
+                else:
+                    hint = ("排查: 1) 环境变量已配置? 2) 网络可达? "
+                            "3) 如需本地执行请把 engine 切为 indextts")
                 raise RuntimeError(
-                    "[BSAI-Orchestrator] 云端 TTS(%s) 失败: %s\n"
-                    "排查: 1) 环境变量已配置? 2) 网络可达? "
-                    "3) 如需本地执行请把 engine 切为 indextts"
-                    % (backend, e))
+                    "[BSAI-Orchestrator] 云端 TTS(%s) 失败: %s\n%s" % (backend, e, hint))
         # 本地档：IndexTTS 由画布原节点执行，这里返回 1s 静音占位并提示
         print("[BSAI-Orchestrator] TTS 本地档(indextts): 请把 text 接到 "
               "BSAI IndexTTS 节点执行；本节点不重载模型")
