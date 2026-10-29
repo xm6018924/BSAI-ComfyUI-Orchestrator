@@ -604,21 +604,34 @@ BUILTIN_PROVIDERS = [
     {"name": "BSAI H3-upscale-4K", "kind": "video_upscale", "tier": "local",
      "engine": "h3", "cost": "free"},
     {"name": "FLUX Video Upscale", "kind": "video_upscale", "tier": "cloud",
-     "engine": "flux_upscale", "api_key_env": "BFL_API_KEY", "cost": "per_call"},
+     "engine": "flux_upscale", "api_key_env": "COMFY_API_KEY",
+     "cost": "per_call",
+     "targets": ["1080p", "2K", "4K"], "modes": ["creative", "precise"],
+     "endpoint_doc": "/proxy/bfl/v1/flux-tools/video-upscale-v1"},
     {"name": "Clarity Crystal", "kind": "video_upscale", "tier": "cloud",
      "engine": "crystal", "api_key_env": "CAI_API_KEY", "cost": "per_call"},
+    # 视频配音（video_dub）——官方 Partner Node：VEED Dubbing (#17388)
+    {"name": "VEED Dubbing", "kind": "video_dub", "tier": "cloud",
+     "engine": "veed", "api_key_env": "COMFY_API_KEY", "cost": "per_call",
+     "models": ["standard", "pro"],
+     "endpoint_doc": "/proxy/veed/v1/dubbing"},
 ]
 
 
 def register_builtin_providers():
     """把全家桶已知本地/云端档位写入 capabilities。
-    其他插件仍可自行 BSAIOrch.register() 覆盖同名条目。"""
+    其他插件仍可自行 BSAIOrch.register() 覆盖同名条目。
+    同名条目会被覆盖（engine 升级后 key/端点随 meta 更新）。"""
     for p in BUILTIN_PROVIDERS:
+        meta = {"tier": p["tier"], "engine": p["engine"],
+                "api_key_env": p.get("api_key_env", ""),
+                "cost": p.get("cost", "free")}
+        for k in ("targets", "modes", "models", "endpoint_doc"):
+            if p.get(k):
+                meta[k] = p[k]
         BSAIOrch.register(
             name=p["name"], kind=p["kind"], hardware=[],
             endpoint="", health="", weight=1.0,
-            meta={"tier": p["tier"], "engine": p["engine"],
-                  "api_key_env": p.get("api_key_env", ""),
-                  "cost": p.get("cost", "free")},
+            meta=meta,
         )
     return len(BUILTIN_PROVIDERS)
