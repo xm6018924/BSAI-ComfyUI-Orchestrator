@@ -271,7 +271,78 @@ class BSAIUpscaleSwitch:
         return (images, backend)
 
 
+# ---------------- 双轨：视频配音统一入口（官方 Partner Node #17388） ----------------
+class BSAIDubSwitch:
+    """视频配音统一入口：VIDEO URL 进、VIDEO 出（VEED Dubbing）。
+
+    对齐官方 Partner Node VeedDubbingNode（#17388）：输入可访问的视频 URL +
+    目标语言，输出配音+对口型同步的新视频。走 COMFY_API_KEY。
+    本地无免费配音档，engine 仅 veed（云端）。
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video_url": ("STRING", {"default": "",
+                                         "tooltip": "可访问的视频 URL（含人脸+语音，≤599s）"}),
+                "engine": (
+                    ["auto", "veed"],
+                    {"default": "auto",
+                     "tooltip": "auto = 按 BackendGate 策略决策（当前仅云端档）"}),
+            },
+            "optional": {
+                "model": (["standard", "pro"], {"default": "standard",
+                          "tooltip": "standard=单声道低价；pro=地区口音+立体声"}),
+                "target_language": ("STRING", {"default": "English",
+                                               "tooltip": "目标配音语言"}),
+                "source_language": ("STRING", {"default": "auto",
+                                               "tooltip": "视频原语言（auto 自动检测）"}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("video_url_out", "backend")
+    FUNCTION = "dub"
+    CATEGORY = "BSAI/Orchestrator"
+
+    def dub(self, video_url, engine, model="standard",
+            target_language="English", source_language="auto"):
+        backend = engine
+        if engine == "auto":
+            d = BSAIOrch.decide_tier("video_dub")
+            backend = d.get("engine") or "veed"
+            if d.get("reason"):
+                print("[BSAI-Orchestrator] Dub auto: %s" % d["reason"])
+        if backend != "veed":
+            raise RuntimeError(
+                "[BSAI-Orchestrator] 视频配音暂无本地档，engine 请使用 veed（云端）")
+        if not video_url or not video_url.strip():
+            raise RuntimeError(
+                "[BSAI-Orchestrator] VEED 配音需要可访问的视频 URL（video_url）")
+        import bsai_cloud_gate as gate
+        media_bytes, mime = gate.dub(
+            "veed", video_url, target_language=target_language,
+            source_language=source_language, model=model)
+        # 把配音视频落盘到 output 目录并返回可访问 URL（可对接后续 H3 等流程）
+        out_path = _save_media(media_bytes, "bsai_veed_dub")
+        print("[BSAI-Orchestrator] VEED 配音完成: %s (%s)" % (out_path, mime))
+        return (out_path, backend)
+
+
 # ---------------- 工具 ----------------
+def _save_media(media_bytes, prefix):
+    """把云端返回的媒体字节落盘到 output 目录，返回绝对路径。"""
+    import folder_paths
+    out_dir = folder_paths.get_output_directory()
+    import hashlib, os
+    fn = "%s_%s.mp4" % (prefix, hashlib.md5(media_bytes).hexdigest()[:10])
+    path = os.path.join(out_dir, fn)
+    with open(path, "wb") as f:
+        f.write(media_bytes)
+    return path
+
+
 def _silent_audio(seconds=1.0, sr=24000):
     import torch
     return {"waveform": torch.zeros(1, 1, int(sr * seconds))}
@@ -290,6 +361,7 @@ NODE_CLASS_MAPPINGS = {
     "BSAIOrchestratorBackendGate": BSAIOrchestratorBackendGate,
     "BSAITTSSwitch": BSAITTSSwitch,
     "BSAIUpscaleSwitch": BSAIUpscaleSwitch,
+    "BSAIDubSwitch": BSAIDubSwitch,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -298,4 +370,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIOrchestratorBackendGate": "BSAI Backend Gate (local/cloud dual-track policy)",
     "BSAITTSSwitch": "BSAI TTS Switch (IndexTTS local ↔ HeyGen/ElevenLabs cloud)",
     "BSAIUpscaleSwitch": "BSAI Upscale Switch (SeedVR2/H3 local ↔ FLUX/Crystal cloud)",
+    "BSAIDubSwitch": "BSAI Dub Switch (VEED Dubbing cloud, #17388)",
 }
