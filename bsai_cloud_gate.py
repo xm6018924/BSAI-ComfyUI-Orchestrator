@@ -182,19 +182,22 @@ def _extract_audio(data):
 
 # ================= 视频超分 =================
 def video_upscale(engine, media_bytes=None, target_res="2K",
-                  source_url=None):
+                  source_url=None, mode="creative", prompt=""):
     """云端视频超分统一入口。返回 (media_bytes, mime)。
 
     engine:
-      "flux_upscale" → BFL_API_KEY，BFL FLUX Video Upscale
+      "flux_upscale" → 官方 Comfy Partner Node（#17394）：
+                        POST https://api.comfy.org/proxy/bfl/v1/flux-tools/video-upscale-v1
+                        轮询 /proxy/bfl/v1/get_result，key=COMFY_API_KEY
+                        档位 1080p/2K/4K + by factor，mode creative/precise
       "crystal"      → CAI_API_KEY，ClarityAI Crystal
-    注意：两家原生端点路径未联调，默认值为依据公开文档的最佳推断，
-    首次真实调用前请按返回的 CloudApiError 校准 URL。
+    注意：需要可访问的图床 URL（source_url），本地 bytes 直传尚未联调。
     """
     started = time.time()
     try:
         if engine == "flux_upscale":
-            out = _upscale_bfl(media_bytes, target_res, source_url)
+            out = _upscale_bfl(media_bytes, target_res, source_url,
+                               mode=mode, prompt=prompt)
         elif engine == "crystal":
             out = _upscale_crystal(media_bytes, target_res, source_url)
         else:
@@ -206,33 +209,136 @@ def video_upscale(engine, media_bytes=None, target_res="2K",
         raise
 
 
-def _upscale_bfl(media_bytes, target_res, source_url):
-    key = _need_key("BFL_API_KEY")
-    # BFL 异步：提交 → polling_url → 轮询取结果（端点路径待联调校准）
-    url = "https://api.bfl.ai/v1/flux-video-upscale"
-    payload = {"target_resolution": target_res}
-    if source_url:
-        payload["video_url"] = source_url
-    status, body, _ = _http_json(url, payload,
-                                  {"x-key": key}, timeout=300)
+# 官方 BFL Partner Node 常量（ComfyUI 核心 comfy_api_nodes/nodes_bfl.py 对齐）
+_FLUX_VIDEO_UPSCALE_TARGETS = {"2K": (2560, 1440), "4K": (3840, 2160),
+                               "1080p": (1920, 1080)}
+_FLUX_VIDEO_UPSCALE_MODES = {"creative": 1, "precise": 0}
+
+
+def _upscale_bfl(media_bytes, target_res, source_url, mode="creative", prompt=""):
+    """BFL FLUX Video Upscale V2 —— 官方 Comfy Router 代理实现。
+
+    对齐 ComfyUI 核心 #17394：FluxVideoUpscaleNodeV2
+    提交端点 /proxy/bfl/v1/flux-tools/video-upscale-v1，
+    轮询端点 /proxy/bfl/v1/get_result?polling_url=...，
+    鉴权走 COMFY_API_KEY（与官方 Partner Node 的 X-API-KEY 一致）。
+    """
+    key = (os.environ.get("COMFY_API_KEY", "").strip()
+           or _need_key("BFL_API_KEY"))  # 兼容旧配置
+    base = "https://api.comfy.org"
+    # 官方请求模型 BFLFluxVideoUpscaleRequest：input_video / upscale_factor / creativity / prompt
+    # 档位换算：官方 V2 把 target box 折算为 upscale_factor（1.5~3.0），
+    # 这里按官方 V1 的默认因子 2.0 提交，并透传 mode/prompt。
+    factor = 2.0
+    payload = {
+        "input_video": source_url,
+        "upscale_factor": factor,
+        "creativity": _FLUX_VIDEO_UPSCALE_MODES.get(mode, 1),
+        "prompt": prompt.strip() or None,
+        "safety_tolerance": 2,
+    }
+    if not source_url:
+        raise CloudApiError(
+            "bfl 云端超分需要可访问的图床 URL（source_url）；本地 bytes 直传尚未联调")
+    status, body, _ = _http_json(
+        base + "/proxy/bfl/v1/flux-tools/video-upscale-v1", payload,
+        {"X-API-KEY": key,
+         "Idempotency-Key": "bsai-bfl-%d" % int(time.time())},
+        timeout=300)
     info = json.loads(body.decode("utf-8", "ignore"))
     poll = info.get("polling_url") or info.get("status_url")
     if not poll:
         raise CloudApiError("bfl submit missing polling_url: %s" % body[:300])
+    # 官方轮询走代理：/proxy/bfl/v1/get_result?polling_url=...
+    poll_url = base + "/proxy/bfl/v1/get_result?polling_url=" + poll
     for _ in range(60):
         time.sleep(3)
-        st, data_body, _ = _http_get(poll, {"x-key": key})
+        try:
+            st, data_body, _ = _http_get(poll_url, {"X-API-KEY": key})
+        except CloudApiError:
+            continue
         data = json.loads(data_body.decode("utf-8", "ignore"))
-        if data.get("status") == "Ready":
+        if data.get("status") == "ready":
             result = data.get("result", {})
-            vurl = result.get("video_url") or result.get("url")
+            vurl = result.get("sample") or result.get("video_url") or result.get("url")
             if vurl:
                 _, media, _ = _http_get(vurl, {}, timeout=300)
                 return media, "video/mp4"
-            raise CloudApiError("bfl ready but no video_url: %s" % str(data)[:300])
-        if data.get("status") in ("Error", "Failed"):
+            raise CloudApiError("bfl ready but no sample: %s" % str(data)[:300])
+        if data.get("status") in ("error", "failed", "request_moderated",
+                                  "content_moderated"):
             raise CloudApiError("bfl job failed: %s" % str(data)[:300])
     raise CloudApiError("bfl job timeout (~180s)")
+
+
+# ================= 视频配音（VEED Dubbing，官方 #17388） =================
+def dub(engine, video_url, target_language="English",
+        source_language="auto", model="standard"):
+    """云端视频配音统一入口。返回 (media_bytes, mime)。
+
+    engine:
+      "veed" → 官方 Comfy Partner Node（#17388）：VeedDubbingNode
+               POST https://api.comfy.org/proxy/veed/v1/dubbing
+               model="standard"（单声道）或 "pro"（地区口音+立体声）
+               提交后按 job_id 轮询至 COMPLETED，取 result.video.url。
+    """
+    started = time.time()
+    try:
+        if engine == "veed":
+            out = _dub_veed(video_url, target_language, source_language, model)
+        else:
+            raise CloudApiError("unknown dub engine: %r" % engine)
+        _record(engine, True, time.time() - started, "")
+        return out
+    except Exception as e:
+        _record(engine, False, time.time() - started, str(e))
+        raise
+
+
+def _dub_veed(video_url, target_language, source_language, model):
+    key = _need_key("COMFY_API_KEY")
+    base = "https://api.comfy.org"
+    route = "dubbing-pro" if model == "pro" else "dubbing"
+    payload = {"video_url": video_url,
+               "target_language": target_language,
+               "source_language": (None if source_language == "auto"
+                                   else source_language)}
+    status, body, _ = _http_json(
+        base + "/proxy/veed/v1/" + route, payload,
+        {"X-API-KEY": key,
+         "Idempotency-Key": "bsai-veed-%d" % int(time.time())},
+        timeout=300)
+    info = json.loads(body.decode("utf-8", "ignore"))
+    job_id = (info.get("data") or {}).get("job_id") or info.get("job_id")
+    if not job_id:
+        raise CloudApiError("veed submit missing job_id: %s" % body[:300])
+    # 轮询最多 ~300s（VEED 官方 poll_interval=10s，completed_statuses=COMPLETED/FAILED/CANCELLED）
+    for _ in range(30):
+        time.sleep(10)
+        try:
+            st, data_body, _ = _http_get(
+                base + "/proxy/veed/v1/%s/%s" % (route, job_id),
+                {"X-API-KEY": key})
+        except CloudApiError:
+            continue
+        data = json.loads(data_body.decode("utf-8", "ignore"))
+        job_status = (data.get("data") or {}).get("status") or data.get("status")
+        if job_status == "COMPLETED":
+            job_result = ((data.get("data") or {}).get("result") or {})
+            vurl = (job_result.get("video") or {}).get("url")
+            if not vurl and job_result.get("files"):
+                vurl = job_result["files"][0].get("url")
+            if not vurl:
+                raise CloudApiError("veed completed but no video url: %s"
+                                    % str(data)[:300])
+            _, media, _ = _http_get(vurl, {}, timeout=300)
+            return media, "video/mp4"
+        if job_status in ("FAILED", "CANCELLED"):
+            err = (data.get("data") or {}).get("error") or {}
+            raise CloudApiError("veed job %s [%s]: %s"
+                                % (job_status, err.get("code", "?"),
+                                   err.get("message", ""))[:300])
+    raise CloudApiError("veed job timeout (~300s)")
 
 
 def _upscale_crystal(media_bytes, target_res, source_url):
